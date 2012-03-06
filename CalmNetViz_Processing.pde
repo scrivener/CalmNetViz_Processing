@@ -42,10 +42,9 @@ private final int mapY = 200;
 
 private final int WIDTH = 800;
 private final int HEIGHT = 600;
-private final int DEFAULT_PIN_SIZE = 10;
 
 private class pin {
-  public int size;
+  public int state;
   public float lat;
   public float lon;
  
@@ -60,11 +59,17 @@ private class pin {
     this.lat = lat;
     this.lon = lon;
     
-    this.size = DEFAULT_PIN_SIZE;
+    this.state = 0;
   }
+
   public void drawSelf() {
-    fill(0xff, 0xff, 0x00);
-    ellipse(this.x, this.y, this.size, this.size);
+    fill(0xff, 0xff, 0x00, 0xff - this.state);
+    ellipse(this.x, this.y, this.state, this.state);
+
+    fill(0x00, 0xff, 0xff, this.state);
+    ellipse(this.x, this.y, 0xff - this.state, 0xff - this.state);
+
+    this.state++;
   }
 }
 
