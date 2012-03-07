@@ -45,7 +45,8 @@ private final int HEIGHT = 600;
 
 private final int DEAD_TIMER_CAP = 10;  //10 frames after losing the last of its bytes, a pin vanishes
 
-private class pin {
+private class Pin {
+  public int state;
   public float lat;
   public float lon;
   
@@ -97,6 +98,17 @@ private class pin {
   }
   public void subBytes(int bytes) {
     this.bytes -= bytes; 
+    this.state = 0;
+  }
+
+  public void drawSelf() {
+    fill(0xff, 0xff, 0x00, 0xff - this.state);
+    ellipse(this.x, this.y, this.state, this.state);
+
+    fill(0x00, 0xff, 0xff, this.state);
+    ellipse(this.x, this.y, 0xff - this.state, 0xff - this.state);
+
+    this.state++;
   }
 }
 
