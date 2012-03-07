@@ -22,31 +22,63 @@ import org.rsg.carnivore.net.*;
 import org.rsg.lib.Log;
 
 SQLite db;
+boolean dbConnected = false;
+PrintWriter output;
 
-HashMap<IPAddress, pin> pins = new HashMap<IPAddress, pin>();
+HashMap<String, Pin> pins = new HashMap<String, Pin>();
 HashSet<String> countries = new HashSet<String>();
 HashSet<String> cities = new HashSet<String>();
 
 PImage mapImage;
-
-float shrinkSpeed = 0.97;
-int splitter, x, y;
-PFont font;
+private final String mapFilename = "1024px-Equirectangular-projection.jpg";
 int ctr = 0;
 int average[];
 int avgBin = 0;
 int newPackets = 0;
 
-private final int mapX = 100;
-private final int mapY = 200;
+Pin localPin, broadcastPin, loopbackPin, autoconfigPin;
 
-private final int WIDTH = 800;
+// CONSTANTS
+private final double WINDOW_SIZE = 15; // reference 'max'
+private final double MAX_CNT = 125000; // 1Mbps in bytes/s.
+private final float WINDOW_WEIGHT = 0.55;
+private final float MAX_BANDWIDTH = 100000000.0; 
+private final int BINS = 5;
+private final int mapX = 0;
+private final int mapY = 0;
+private final int WIDTH = 1024;
 private final int HEIGHT = 600;
+private final int DEAD_TIMER_CAP = 60;  //10 frames after losing the last of its bytes, a pin vanishes
 
-private final int DEAD_TIMER_CAP = 10;  //10 frames after losing the last of its bytes, a pin vanishes
+private final String LOCAL_IP = "LOCAL";
+private final String LOOPBACK_IP = "LOOPBACK";
+private final String BROADCAST_IP = "BROADCAST";
+private final String AUTOCONFIG_IP = "AUTOCONFIG";
+private final String TESTNET_IP = "TESTNET";
+private final String OTHER_IP = "OTHER";
+
+LinkedList<pkt> inWindow = new LinkedList<pkt>();
+LinkedList<pkt> inNow = new LinkedList<pkt>();
+CarnivoreP5 c;
+
+Date lastTime;
+
+int lastBG[]  = new int[3];
 
 private class Pin {
   public int state;
+  public int animation;
+  
+  private final int STATE_STATIC = 0;
+  private final int STATE_ANIMATE = 1;
+  
+  private final int ANIMATION_MAX = 20;
+  private final int ANIMATION_RADIUS = 400;
+  
+  private final int PULSE_MAX = 5;
+  
+  private int pulse = -1 * PULSE_MAX;
+  
   public float lat;
   public float lon;
   
@@ -59,85 +91,101 @@ private class Pin {
   
   public int bytes = 0;
   
-  private int deadTimer = 0;
+  private int deadTimer = 1;
+  private boolean pulseUp = true;
   
   public Pin(PImage mapImage, float lat, float lon, String country, String city) {
     this.mapImage = mapImage;
-    this.x = map(lon, -180, 180, 100, mapX+mapImage.width);
-    this.y = map(lat, 90, -90, 200, mapY+mapImage.height);
+    this.x = map(lon, -180, 180, mapX, mapX+mapImage.width);
+    this.y = map(lat, 90, -90, mapY, mapY+mapImage.height);
     this.lat = lat;
     this.lon = lon;
     this.country = country;
     this.city = city;
     
-//    this.size = DEFAULT_PIN_SIZE;
+    this.state = STATE_ANIMATE;
+    this.animation = 1;
+  }
+  private int pulseStep() {
+    if (pulseUp) { pulse++; }
+    else         { pulse--; }
+    if (pulse >= PULSE_MAX)      { pulseUp = false; }
+    if (pulse <= PULSE_MAX * -1) { pulseUp = true; }
+    return pulse;
   }
   public boolean drawSelf() {
-    int rad = Math.log(bytes);
+    int rad = 8;
     if (bytes > 0) {
-      fill(0xff, 0xff, 0x00);
-      ellipse(this.x, this.y, rad, rad);
+      rad = (int)Math.log(bytes)*5;      
+    }
+    if (rad < 8) {
+      rad = 8; 
+    }
+    rad += this.pulseStep();
+
+    if (state == STATE_STATIC) {
+      //println("static, rad="+rad);
+      if (bytes > 0) {
+        int variation = int(random(3));
+        //println("bytes >0");
+        fill(0x00, 0x00, 0x00, 0x00);
+        stroke(0xff, 0x00, 0xff);
+        ellipse(this.x, this.y, rad, rad);
+        return true;
+      }
+      else if (deadTimer <= DEAD_TIMER_CAP) {
+        stroke(0xff, 0xff, 0x00, 0xaa/deadTimer);  //no bytes left in window - display as transparent
+        fill(0x00, 0x00);
+        ellipse(this.x, this.y, rad, rad);
+        deadTimer++;
+        return true;
+      }
+      else {
+        return false;
+      }
+    }
+    else if (state == STATE_ANIMATE) {
+      //println("animating");
+      // circle starts large, gets small
+      // starts fully opaque, becomes transparent
+      fill(0x00, 0x00, 0x00, 0x00);
+      stroke(0xff, 0xff, 0x00);
+      ellipse(this.x, this.y, ANIMATION_RADIUS/this.animation, ANIMATION_RADIUS/this.animation);
+  
+      // circle starts small, gets to target size
+      // starts transparent, becomes opaque
+      fill(0xff, 0xff, 0x00, 0x00);
+      stroke(0xff, 0xff, 0x00);
+      ellipse(this.x, this.y, rad - (rad/this.animation), rad - (rad/this.animation));
+  
+      this.animation++;
+      if (this.animation >= ANIMATION_MAX) {
+        this.state = STATE_STATIC; 
+      }
       return true;
     }
-    else if (deadTimer <= DEAD_TIMER_CAP) {
-      fill(0xff, 0xff, 0x00, 0x88);  //no bytes left in window - display as transparent
-      ellipse(this.x, this.y, rad, rad);
-      deadTimer++;
-      return true;
-    }
-    else {
-      return false;
-    }
-    
+    return false;
   }
+    
   public void addBytes(int bytes) {
     this.bytes += bytes;
     if (bytes > 0) {
-      deadTimer = 0; 
+      deadTimer = 1; 
     }
   }
   public void subBytes(int bytes) {
     this.bytes -= bytes; 
-    this.state = 0;
-  }
-
-  public void drawSelf() {
-    fill(0xff, 0xff, 0x00, 0xff - this.state);
-    ellipse(this.x, this.y, this.state, this.state);
-
-    fill(0x00, 0xff, 0xff, this.state);
-    ellipse(this.x, this.y, 0xff - this.state, 0xff - this.state);
-
-    this.state++;
   }
 }
-
 
 private class pkt {
   public Date time;
   public int bytes;
+  public IPAddress ip;
 }
-private final double WINDOW_SIZE = 15; // reference 'max'
-private final double MAX_CNT = 125000; // 1Mbps in bytes/s.
-private final float WINDOW_WEIGHT = 0.55;
-LinkedList<pkt> inWindow = new LinkedList<pkt>();
-LinkedList<pkt> inNow = new LinkedList<pkt>();
-int inTotal = 0;
-int windowTotal = 0;
-CarnivoreP5 c;
-PFont font32;
 
-private final float MAX_BANDWIDTH = 100000000.0; 
-private final int BINS = 5;
-Date lastTime;
-
-int lastBG[]  = new int[3];
-
-boolean dbConnected = false;
-
-
-void setup() 
-{
+void setup() {
+  // connect to the database of geolocation data
   db = new SQLite(this, "hostip.sqlite3"); //open database file!
   if (db.connect()) {
     dbConnected = true;  
@@ -146,8 +194,19 @@ void setup()
     dbConnected = false; 
   }
   
-  mapImage = loadImage("512px-Equirectangular-projection.jpg");
+  output = createWriter("uniqueIPs.txt");
   
+  // load the map image
+  mapImage = loadImage(mapFilename);
+  
+  // setup pins for local, loopback, autoconfig, broadcast.
+  //public Pin(PImage mapImage, float lat, float lon, String country, String city) {
+  localPin = new Pin(mapImage, -105, -160, null, null);
+  broadcastPin = new Pin(mapImage, -105, -120, null, null);
+  loopbackPin = new Pin(mapImage, -105, -80, null, null);
+  autoconfigPin = new Pin(mapImage, -105, -40, null, null);
+
+  // 
   size(WIDTH, HEIGHT);
   background(0x00, 0x55, 0xcc);
   frameRate(10);
@@ -165,6 +224,7 @@ void setup()
 }
 
 void draw() {
+  // draw background color according to general traffic rates
   int bg[] = getBackgroundColorFromTrafficSpeed();
   int r = lastBG[0];
   if (bg[0] > lastBG[0]) {
@@ -180,15 +240,32 @@ void draw() {
   lastBG[1] = g;
   lastBG[2] = b;
   
-  // draw new packets
-  for (int i=0; i<newPackets/2; i++) {
-    stroke(0xFF, 0xFF, 0xFF);
-    int x = int(random(WIDTH-1));
-    int y = int(random(HEIGHT-1));
-    point(x,y);
+  drawPointsForNewPackets();
+  drawDbConnectedIndicator();
+
+  // draw map
+  image(mapImage, mapX, mapY);
+  
+  drawPinsOnMap();
+  
+}
+
+synchronized private void drawPinsOnMap() {
+  // draw pins on map
+  Iterator<Pin> iter = pins.values().iterator();
+  while (iter.hasNext()) {
+    Pin p = iter.next();
+    boolean keep = p.drawSelf(); 
+    if (!keep) {
+      iter.remove();
+    } 
   }
-  newPackets = newPackets/2;
-  stroke(0);  
+  localPin.drawSelf();
+  broadcastPin.drawSelf();
+  loopbackPin.drawSelf();
+  autoconfigPin.drawSelf();
+}
+private void drawDbConnectedIndicator() {
   if (dbConnected) {
     fill(0x00, 0xFF, 0x00); 
   }
@@ -196,31 +273,18 @@ void draw() {
     fill(0xFF, 0x00, 0x00); 
   }
   ellipse(15, 15, 10, 10);
-  
-  Iterator<String> countriesIter = countries.iterator();
-  int q = 50;
-  while (countriesIter.hasNext()) {
-    text(countriesIter.next(), 50, q); 
-    q = q+20;
+}
+private void drawPointsForNewPackets() {
+  // draw new packets
+  for (int i=0; i<this.newPackets/2; i++) {
+    stroke(0xFF, 0xFF, 0xFF);
+    int x = int(random(WIDTH-1));
+    int y = int(random(mapImage.height, HEIGHT-1));
+    point(x,y);
   }
+  this.newPackets = this.newPackets/2;
+  stroke(0);  
   
-  Iterator<String> citiesIter = cities.iterator();
-  q = 50;
-  while (citiesIter.hasNext()) {
-    text(citiesIter.next(), 250, q); 
-    q = q+20;
-  }
-  
-  // draw map
-  
-  image(mapImage, mapX, mapY);
-  
-  // draw pins
-//  pin seattle = new pin(mapImage, 47.53, -122.30);
-//  pin poughkeepsie = new pin(mapImage, 41.7, -73.93);
-  
-//  seattle.drawSelf( );
-//  poughkeepsie.drawSelf();
 }
 
 int[] getBackgroundColorFromTrafficSpeed() {
@@ -253,7 +317,6 @@ int[] getBackgroundColorFromTrafficSpeed() {
 
 synchronized void prune() {
   pkt p;
-  int i=0;
   // prune old data from last second buffer
   while (inNow.size() > 0) {
     p = inNow.remove();
@@ -262,7 +325,29 @@ synchronized void prune() {
       break; 
     }
     else {
-      i++;
+      Pin pin;
+      String reserved = isReserved(p.ip);
+      if (reserved == null) {
+        pin = pins.get(p.ip.toString());
+      }
+      else if (reserved.equals(LOCAL_IP)) { 
+        pin = localPin;
+      }
+      else if (reserved.equals(BROADCAST_IP)) {
+        pin = broadcastPin;
+      }
+      else if (reserved.equals(LOOPBACK_IP)) {
+        pin = loopbackPin;
+      }
+      else if (reserved.equals(AUTOCONFIG_IP)) {  
+        pin = autoconfigPin;
+      }
+      else {
+        pin = null; 
+      }
+      if (pin != null) {
+        pin.subBytes(p.bytes);
+      }
     }
   }  
   // prune old data from last minute buffer
@@ -273,9 +358,6 @@ synchronized void prune() {
        break;
     } 
   } 
-  if (i > 0) {
- //   System.out.println(i); 
-  }
 }
 synchronized int sumList(LinkedList<pkt> l) {
   Date nowTime = new Date();
@@ -331,7 +413,9 @@ String getCountryByIP(IPAddress ip) {
   
 }
 
-int[] getLatLonByIP(IPAddress ip) {
+float[] getLatLonByIP(IPAddress ip) {
+  float lat = 1000;
+  float lng = 1000;
   if (!dbConnected) {
     return null;
   }
@@ -340,45 +424,114 @@ int[] getLatLonByIP(IPAddress ip) {
   while (db.next()) {
     city = db.getString("City"); 
   }
-  if (!city.equals("NONE")) {
-    db.query("SELECT lat, lng as \"Latitude\", \"Longitude\" FROM cityByCountry WHERE city="+city);
+  if (!city.equals("NONE") && !city.equals("0")) {
+    db.query("SELECT lat AS \"Latitude\", lng AS \"Longitude\" FROM cityByCountry WHERE city="+city);  
+    while (db.next()) {
+      lat = db.getFloat("Latitude");
+      lng = db.getFloat("Longitude"); 
+    }
   }
-  float lat = 1000;
-  float lng = 1000;
-  while (db.next()) {
-    lat = db.getFloat("Latitude");
-    lng = db.getFloat("Longitude"); 
+  else {
+    String country = getCountryByIP(ip);
+    String q = "SELECT lat AS \"Latitude\", lng AS \"Longitude\" FROM countryLatLon WHERE name=\""+country+"\"";
+    //println(q);
+    db.query(q);
+    while (db.next()) {
+      lat = db.getFloat("Latitude");
+      lng = db.getFloat("Longitude"); 
+    }
   }
   
-  return [lat, lng];
+  float[] latlon = {lat, lng};
+  return latlon;
 }
 // Called each time a new packet arrives
 synchronized void packetEvent(CarnivorePacket packet) {
   pkt pkt = new pkt();
   pkt.time = new Date();
+  pkt.ip = packet.senderAddress;
   pkt.bytes = packet.data.length;
   
   if (pkt.bytes == 0) {
     return;
   }
-  IPAddress ip = packet.receiverAddress;  
-  String country = getCountryByIP(ip);
-  String city = getCityByIP(ip);
-  int[] latlon = getLatLonByIP(ip);
-
-  Pin p;
-  if (pins.containsKey(ip)) {
-    p = pins.get(packet.receiver); 
-  }
-  else {
-    p = new Pin(mapImage, lat, lon, country, city);
-  }
-  p.addBytes(pkt.bytes);
-  //println(packet.receiverAddress+" maps to "+country);
+  IPAddress ip = packet.senderAddress;
   
+  String reserved = isReserved(ip);
+  if (reserved == null) {
+    Pin p;
+    if (pins.containsKey(packet.senderAddress.toString())) {
+      p = pins.get(packet.senderAddress.toString()); 
+    }
+    else {
+      String country = getCountryByIP(ip);
+      String city = getCityByIP(ip);
+      float[] latlon = getLatLonByIP(ip);
+      float lat = latlon[0];
+      float lon = latlon[1];
+
+      p = new Pin(mapImage, lat, lon, country, city);
+      pins.put(ip.toString(), p);
+      output.println(ip.toString());
+      output.flush();
+    }
+    p.addBytes(pkt.bytes);  
+  }  
+  else if (reserved == LOCAL_IP) { 
+    localPin.addBytes(pkt.bytes);
+  }
+  else if (reserved == BROADCAST_IP) {
+    broadcastPin.addBytes(pkt.bytes);
+  }
+  else if (reserved == LOOPBACK_IP) {
+    loopbackPin.addBytes(pkt.bytes);
+  }
+  else if (reserved == AUTOCONFIG_IP) {  
+    autoconfigPin.addBytes(pkt.bytes);
+  }
+  else { //testnet or other - shouldn't see these, ignore them?
+    return;
+  }
+  //println(reserved);
   inWindow.add(pkt);
   inNow.add(pkt);
   
   newPackets++;
-  //println("[PDE] packetEvent: " + packet.toString());  
+}
+
+private String isReserved(IPAddress ip) {
+  if (    ip.octet1() == 10    ||
+         (ip.octet1() == 172 && ip.octet2() >= 16 && ip.octet2() <= 31)  ||
+         (ip.octet1() == 192 && ip.octet2() == 168)   ) { 
+           
+           return LOCAL_IP;
+           
+  }
+  if (    ip.octet1() == 127     ) {
+    
+           return LOOPBACK_IP; 
+  }
+  if (    ip.octet1() == 0     || 
+          ip.octet1() == 255 && ip.octet2() == 255 && ip.octet3() == 255 && ip.octet4() == 255   ) {
+            
+           return BROADCAST_IP;          
+  }
+  if (    (ip.octet1() == 169 && ip.octet2() == 254)    ) {
+    
+           return AUTOCONFIG_IP; 
+  }         
+  if (    (ip.octet1() == 198 && ip.octet2() == 51 && ip.octet3() == 100)  ||
+          (ip.octet1() == 203 && ip.octet2() == 0  && ip.octet3() == 113)  ||
+          (ip.octet1() == 192 && ip.octet2() == 0  && ip.octet3() == 2)     ) {
+            
+           return TESTNET_IP;          
+  }
+  if (    ip.octet1() >= 224   ||      
+          ip.octet1() >= 240   ||
+          (ip.octet1() == 192 && ip.octet2() == 88 && ip.octet3() == 99)   ||          
+          (ip.octet1() == 198 && ip.octet2() >= 18 && ip.octet2() <= 19)    ) {
+  
+           return OTHER_IP;          
+  }
+  return null;
 }
