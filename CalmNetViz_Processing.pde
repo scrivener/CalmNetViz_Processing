@@ -1,4 +1,4 @@
-g/**
+/**
  * Carnivore Client 
  * by Alexander R. Galloway. 
  
