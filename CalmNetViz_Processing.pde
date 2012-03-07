@@ -1,4 +1,4 @@
-/**
+g/**
  * Carnivore Client 
  * by Alexander R. Galloway. 
  
@@ -42,29 +42,61 @@ private final int mapY = 200;
 
 private final int WIDTH = 800;
 private final int HEIGHT = 600;
-private final int DEFAULT_PIN_SIZE = 10;
+
+private final int DEAD_TIMER_CAP = 10;  //10 frames after losing the last of its bytes, a pin vanishes
 
 private class pin {
-  public int size;
   public float lat;
   public float lon;
+  
+  public String country;
+  public String city;
  
   public PImage mapImage;
   public float x;
   public float y; 
   
-  public pin(PImage mapImage, float lat, float lon) {
+  public int bytes = 0;
+  
+  private int deadTimer = 0;
+  
+  public Pin(PImage mapImage, float lat, float lon, String country, String city) {
     this.mapImage = mapImage;
     this.x = map(lon, -180, 180, 100, mapX+mapImage.width);
     this.y = map(lat, 90, -90, 200, mapY+mapImage.height);
     this.lat = lat;
     this.lon = lon;
+    this.country = country;
+    this.city = city;
     
-    this.size = DEFAULT_PIN_SIZE;
+//    this.size = DEFAULT_PIN_SIZE;
   }
-  public void drawSelf() {
-    fill(0xff, 0xff, 0x00);
-    ellipse(this.x, this.y, this.size, this.size);
+  public boolean drawSelf() {
+    int rad = Math.log(bytes);
+    if (bytes > 0) {
+      fill(0xff, 0xff, 0x00);
+      ellipse(this.x, this.y, rad, rad);
+      return true;
+    }
+    else if (deadTimer <= DEAD_TIMER_CAP) {
+      fill(0xff, 0xff, 0x00, 0x88);  //no bytes left in window - display as transparent
+      ellipse(this.x, this.y, rad, rad);
+      deadTimer++;
+      return true;
+    }
+    else {
+      return false;
+    }
+    
+  }
+  public void addBytes(int bytes) {
+    this.bytes += bytes;
+    if (bytes > 0) {
+      deadTimer = 0; 
+    }
+  }
+  public void subBytes(int bytes) {
+    this.bytes -= bytes; 
   }
 }
 
@@ -172,11 +204,11 @@ void draw() {
   image(mapImage, mapX, mapY);
   
   // draw pins
-  pin seattle = new pin(mapImage, 47.53, -122.30);
-  pin poughkeepsie = new pin(mapImage, 41.7, -73.93);
+//  pin seattle = new pin(mapImage, 47.53, -122.30);
+//  pin poughkeepsie = new pin(mapImage, 41.7, -73.93);
   
-  seattle.drawSelf();
-  poughkeepsie.drawSelf();
+//  seattle.drawSelf( );
+//  poughkeepsie.drawSelf();
 }
 
 int[] getBackgroundColorFromTrafficSpeed() {
@@ -286,6 +318,28 @@ String getCountryByIP(IPAddress ip) {
   return countryName;
   
 }
+
+int[] getLatLonByIP(IPAddress ip) {
+  if (!dbConnected) {
+    return null;
+  }
+  db.query("SELECT city as \"City\" FROM ip4_"+ip.octet1()+" WHERE b="+ip.octet2()+" AND c="+ip.octet3()+";");
+  String city = "NONE";
+  while (db.next()) {
+    city = db.getString("City"); 
+  }
+  if (!city.equals("NONE")) {
+    db.query("SELECT lat, lng as \"Latitude\", \"Longitude\" FROM cityByCountry WHERE city="+city);
+  }
+  float lat = 1000;
+  float lng = 1000;
+  while (db.next()) {
+    lat = db.getFloat("Latitude");
+    lng = db.getFloat("Longitude"); 
+  }
+  
+  return [lat, lng];
+}
 // Called each time a new packet arrives
 synchronized void packetEvent(CarnivorePacket packet) {
   pkt pkt = new pkt();
@@ -294,12 +348,20 @@ synchronized void packetEvent(CarnivorePacket packet) {
   
   if (pkt.bytes == 0) {
     return;
-  }  
-  String country = getCountryByIP(packet.receiverAddress);
-  String city = getCityByIP(packet.receiverAddress);
+  }
+  IPAddress ip = packet.receiverAddress;  
+  String country = getCountryByIP(ip);
+  String city = getCityByIP(ip);
+  int[] latlon = getLatLonByIP(ip);
 
-  countries.add(country);
-  cities.add(city);
+  Pin p;
+  if (pins.containsKey(ip)) {
+    p = pins.get(packet.receiver); 
+  }
+  else {
+    p = new Pin(mapImage, lat, lon, country, city);
+  }
+  p.addBytes(pkt.bytes);
   //println(packet.receiverAddress+" maps to "+country);
   
   inWindow.add(pkt);
